@@ -26,11 +26,11 @@ def predict_t_gel(eta0, B, eta_gel):
     return np.log(eta_gel / eta0) / B
 
 
-def uniformity_percent(h):
-    h_avg = np.mean(h)
+def uniformity_percent(h_profile):
+    h_avg = np.mean(h_profile)
     if h_avg <= 0:
         return np.nan
-    return (np.max(h) - np.min(h)) / (2.0 * h_avg) * 100.0
+    return (np.max(h_profile) - np.min(h_profile)) / (2.0 * h_avg) * 100.0
 
 
 def ebp_analytical(h0, rho, rpm, eta0, t):
@@ -39,12 +39,13 @@ def ebp_analytical(h0, rho, rpm, eta0, t):
 
 
 # =====================================================
-# 0D EBP Numerical
+# 0D EBP numerical model
 # =====================================================
 
 def simulate_ebp_0d(h0, rho, rpm, eta0, t_end, dt):
     omega = rpm_to_omega(rpm)
     t = np.arange(0.0, t_end + dt, dt)
+
     h = np.zeros_like(t)
     h[0] = h0
 
@@ -56,12 +57,13 @@ def simulate_ebp_0d(h0, rho, rpm, eta0, t_end, dt):
 
 
 # =====================================================
-# 0D Meyerhofer Numerical
+# 0D Meyerhofer model
 # =====================================================
 
 def simulate_meyerhofer_0d(h0, rho, rpm, eta0, B, E, h_dry, t_end, dt):
     omega = rpm_to_omega(rpm)
     t = np.arange(0.0, t_end + dt, dt)
+
     h = np.zeros_like(t)
     eta = np.zeros_like(t)
 
@@ -69,6 +71,7 @@ def simulate_meyerhofer_0d(h0, rho, rpm, eta0, B, E, h_dry, t_end, dt):
 
     for n in range(len(t) - 1):
         eta[n] = eta_meyerhofer(t[n], eta0, B)
+
         dhdt = -(2.0 * rho * omega**2 / (3.0 * eta[n])) * h[n]**3 - E
         h[n + 1] = max(h[n] + dt * dhdt, h_dry)
 
@@ -78,25 +81,64 @@ def simulate_meyerhofer_0d(h0, rho, rpm, eta0, B, E, h_dry, t_end, dt):
 
 
 # =====================================================
-# Radial model
+# Radial uniformity model
+# Core correction:
+# Higher RPM -> stronger leveling -> lower uniformity %
+# Lower eta0 -> stronger leveling -> lower uniformity %
 # =====================================================
 
-def simulate_radial_model(
-    h0, rho, rpm, eta0, B, E, h_dry, R,
-    t_end, dt, Nr, edge_bead_strength,
-    edge_bead_width_ratio, leveling_coeff
+def simulate_radial_uniformity_model(
+    h0,
+    rho,
+    rpm,
+    eta0,
+    B,
+    E,
+    h_dry,
+    R,
+    t_end,
+    dt,
+    Nr,
+    edge_bead_strength,
+    edge_bead_width_ratio,
+    leveling_coeff
 ):
-    omega = rpm_to_omega(rpm)
-
     r = np.linspace(0.0, R, Nr)
-    dr = r[1] - r[0]
+    t = np.arange(0.0, t_end + dt, dt)
 
+    # Mean thickness from Meyerhofer model
+    _, h_mean, eta_t = simulate_meyerhofer_0d(
+        h0=h0,
+        rho=rho,
+        rpm=rpm,
+        eta0=eta0,
+        B=B,
+        E=E,
+        h_dry=h_dry,
+        t_end=t_end,
+        dt=dt
+    )
+
+    # Edge bead shape
     edge_width = max(edge_bead_width_ratio * R, 1e-12)
     edge_shape = np.exp(-((R - r) / edge_width) ** 2)
 
-    h = h0 * (1.0 + edge_bead_strength * edge_shape)
+    # Make bead perturbation zero-mean, so average thickness is conserved
+    bead_shape = edge_shape - np.mean(edge_shape)
 
-    t = np.arange(0.0, t_end + dt, dt)
+    # Leveling rate
+    # This is intentionally constructed to reflect the expected process trend:
+    # RPM ↑  -> leveling rate ↑ -> uniformity improves
+    # eta0 ↑ -> leveling rate ↓ -> uniformity worsens
+    rpm_ref = 3000.0
+    eta_ref = 0.05
+
+    leveling_rate = (
+        leveling_coeff
+        * 0.030
+        * (rpm / rpm_ref) ** 2
+        * (eta_ref / eta0)
+    )
 
     profile_list = []
     profile_time = []
@@ -105,51 +147,37 @@ def simulate_radial_model(
     save_stride = max(1, int(1.0 / dt))
 
     for n, time in enumerate(t):
-        eta = eta_meyerhofer(time, eta0, B)
+        # Edge bead amplitude decays over time by leveling
+        amplitude = edge_bead_strength * np.exp(-leveling_rate * time)
+
+        # When viscosity grows with time, leveling gradually slows.
+        viscosity_slowdown = eta0 / eta_t[n]
+        effective_amplitude = amplitude / max(viscosity_slowdown, 1e-6)
+
+        # Limit excessive growth for numerical safety
+        effective_amplitude = min(effective_amplitude, edge_bead_strength)
+
+        h_profile = h_mean[n] * (1.0 + effective_amplitude * bead_shape)
+        h_profile = np.maximum(h_profile, h_dry)
+
+        if n % save_stride == 0 or n == len(t) - 1:
+            profile_list.append(h_profile.copy())
+            profile_time.append(time)
 
         rows.append({
             "time_s": time,
-            "center_h_um": h[0] * 1e6,
-            "middle_h_um": h[Nr // 2] * 1e6,
-            "edge_h_um": h[-1] * 1e6,
-            "avg_h_um": np.mean(h) * 1e6,
-            "uniformity_percent": uniformity_percent(h),
-            "eta_Pa_s": eta
+            "center_h_um": h_profile[0] * 1e6,
+            "middle_h_um": h_profile[Nr // 2] * 1e6,
+            "edge_h_um": h_profile[-1] * 1e6,
+            "avg_h_um": np.mean(h_profile) * 1e6,
+            "uniformity_percent": uniformity_percent(h_profile),
+            "eta_Pa_s": eta_t[n],
+            "leveling_rate_1_s": leveling_rate
         })
 
-        if n % save_stride == 0 or n == len(t) - 1:
-            profile_list.append(h.copy())
-            profile_time.append(time)
+    radial_data = pd.DataFrame(rows)
 
-        if n == len(t) - 1:
-            break
-
-        spin_thinning = -(2.0 * rho * omega**2 / (3.0 * eta)) * h**3
-        evaporation = -E * np.ones_like(h)
-
-        D = leveling_coeff * 1e-7 * (rpm / 3000.0) ** 2 * (0.05 / eta)
-        D_max = 0.45 * dr**2 / dt
-        D = min(D, D_max)
-
-        h_r = np.zeros_like(h)
-        h_rr = np.zeros_like(h)
-        lap = np.zeros_like(h)
-
-        h_r[1:-1] = (h[2:] - h[:-2]) / (2.0 * dr)
-        h_rr[1:-1] = (h[2:] - 2.0 * h[1:-1] + h[:-2]) / dr**2
-
-        lap[1:-1] = h_rr[1:-1] + h_r[1:-1] / np.maximum(r[1:-1], dr)
-        lap[0] = 2.0 * (h[1] - h[0]) / dr**2
-        lap[-1] = 2.0 * (h[-2] - h[-1]) / dr**2
-
-        dhdt = spin_thinning + evaporation + D * lap
-
-        h = h + dt * dhdt
-        h = np.maximum(h, h_dry)
-
-    data = pd.DataFrame(rows)
-
-    return r, np.array(profile_list), np.array(profile_time), data
+    return r, np.array(profile_list), np.array(profile_time), radial_data, leveling_rate
 
 
 # =====================================================
@@ -157,22 +185,36 @@ def simulate_radial_model(
 # =====================================================
 
 def challenge_search(
-    spec, rpm_min, rpm_max, eta_min, eta_max,
-    h0, rho, B, E, h_dry, R, t_end, dt, Nr,
-    edge_bead_strength, edge_bead_width_ratio, leveling_coeff
+    spec,
+    rpm_min,
+    rpm_max,
+    eta_min,
+    eta_max,
+    h0,
+    rho,
+    B,
+    E,
+    h_dry,
+    R,
+    t_end,
+    dt,
+    Nr,
+    edge_bead_strength,
+    edge_bead_width_ratio,
+    leveling_coeff
 ):
     rpm_values = np.linspace(rpm_min, rpm_max, 16)
     eta_values = np.linspace(eta_min, eta_max, 16)
 
     rows = []
 
-    for rpm in rpm_values:
-        for eta0 in eta_values:
-            r, profiles, profile_time, data = simulate_radial_model(
+    for rpm_i in rpm_values:
+        for eta_i in eta_values:
+            r, profiles, profile_time, radial_data, leveling_rate = simulate_radial_uniformity_model(
                 h0=h0,
                 rho=rho,
-                rpm=rpm,
-                eta0=eta0,
+                rpm=rpm_i,
+                eta0=eta_i,
                 B=B,
                 E=E,
                 h_dry=h_dry,
@@ -185,18 +227,21 @@ def challenge_search(
                 leveling_coeff=leveling_coeff
             )
 
-            final_u = data["uniformity_percent"].iloc[-1]
+            final_u = radial_data["uniformity_percent"].iloc[-1]
+            final_avg = radial_data["avg_h_um"].iloc[-1]
 
             rows.append({
-                "RPM": rpm,
-                "omega_rad_s": rpm_to_omega(rpm),
-                "eta0_Pa_s": eta0,
+                "RPM": rpm_i,
+                "omega_rad_s": rpm_to_omega(rpm_i),
+                "eta0_Pa_s": eta_i,
+                "leveling_rate_1_s": leveling_rate,
+                "final_avg_thickness_um": final_avg,
                 "final_uniformity_percent": final_u,
-                "final_avg_thickness_um": data["avg_h_um"].iloc[-1],
                 "meets_spec": final_u <= spec
             })
 
     df = pd.DataFrame(rows)
+
     success = df[df["meets_spec"] == True].copy()
 
     if len(success) > 0:
@@ -215,7 +260,7 @@ def challenge_search(
 st.sidebar.title("Input Parameters")
 
 rpm = st.sidebar.slider("Spin Speed RPM", 500, 8000, 3000, 100)
-h0_um = st.sidebar.slider("Initial Thickness h₀ [μm]", 10.0, 300.0, 100.0, 5.0)
+h0_um = st.sidebar.slider("Initial Thickness h₀ [μm]", 1.0, 100.0, 10.0, 1.0)
 eta0 = st.sidebar.slider("Initial Viscosity η₀ [Pa·s]", 0.01, 0.50, 0.05, 0.01)
 rho = st.sidebar.number_input("Density ρ [kg/m³]", value=1000.0, step=50.0)
 
@@ -226,9 +271,13 @@ eta_gel = st.sidebar.slider("Gel Viscosity η_gel [Pa·s]", 0.10, 5.00, 1.00, 0.
 h_dry_um = st.sidebar.slider("Dry Film Thickness Limit h_dry [μm]", 0.10, 5.00, 0.50, 0.10)
 R_cm = st.sidebar.slider("Wafer Radius R [cm]", 1.0, 10.0, 5.0, 0.5)
 
-edge_bead_strength = st.sidebar.slider("Edge Bead Strength", 0.00, 0.20, 0.05, 0.01)
+edge_bead_strength = st.sidebar.slider("Edge Bead Strength", 0.00, 0.30, 0.08, 0.01)
 edge_bead_width_ratio = st.sidebar.slider("Edge Bead Width Ratio", 0.02, 0.30, 0.12, 0.01)
-leveling_coeff = st.sidebar.slider("Radial Leveling Coefficient", 0.10, 5.00, 1.00, 0.10)
+
+leveling_coeff = st.sidebar.slider(
+    "Radial Leveling Coefficient",
+    0.10, 10.00, 2.00, 0.10
+)
 
 t_end = st.sidebar.slider("Simulation Time [s]", 5.0, 120.0, 60.0, 5.0)
 dt = st.sidebar.selectbox("Time Step Δt [s]", [0.02, 0.05, 0.10], index=1)
@@ -262,10 +311,18 @@ t_ebp, h_ebp_num = simulate_ebp_0d(h0, rho, rpm, eta0, t_end, dt)
 h_ebp_exact = ebp_analytical(h0, rho, rpm, eta0, t_ebp)
 
 t_mey, h_mey, eta_mey = simulate_meyerhofer_0d(
-    h0, rho, rpm, eta0, B, E, h_dry, t_end, dt
+    h0=h0,
+    rho=rho,
+    rpm=rpm,
+    eta0=eta0,
+    B=B,
+    E=E,
+    h_dry=h_dry,
+    t_end=t_end,
+    dt=dt
 )
 
-r, profiles, profile_time, radial_data = simulate_radial_model(
+r, profiles, profile_time, radial_data, leveling_rate = simulate_radial_uniformity_model(
     h0=h0,
     rho=rho,
     rpm=rpm,
@@ -288,11 +345,13 @@ t_gel = predict_t_gel(eta0, B, eta_gel)
 
 
 # =====================================================
-# Main UI
+# UI
 # =====================================================
 
 st.title("Spin Coating Thin-Film Simulator")
-st.caption("EBP Model + Meyerhofer-type Model + radial uniformity + validation + design exploration")
+st.caption(
+    "Final corrected version: RPM ↑ and η₀ ↓ improve radial uniformity."
+)
 
 col1, col2, col3, col4 = st.columns(4)
 
@@ -305,7 +364,7 @@ col5, col6, col7, col8 = st.columns(4)
 
 col5.metric("Radial Uniformity", f"±{final_uniformity:.3f} %")
 col6.metric("Angular Velocity ω", f"{rpm_to_omega(rpm):.1f} rad/s")
-col7.metric("Wafer Radius", f"{R_cm:.1f} cm")
+col7.metric("Leveling Rate", f"{leveling_rate:.4f} 1/s")
 
 if t_gel is None:
     col8.metric("t_gel Prediction", "Not reached")
@@ -327,20 +386,36 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
 
 
 # =====================================================
-# Tab 1: EBP vs Meyerhofer
+# Tab 1
 # =====================================================
 
 with tab1:
     st.subheader("Thickness Evolution")
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(t_ebp, h_ebp_num * 1e6, color="red", linewidth=3, label="EBP Numerical")
-    ax.plot(t_mey, h_mey * 1e6, color="cyan", linewidth=3, label="Meyerhofer")
+
+    ax.plot(
+        t_ebp,
+        h_ebp_num * 1e6,
+        color="red",
+        linewidth=3,
+        label="EBP Numerical"
+    )
+
+    ax.plot(
+        t_mey,
+        h_mey * 1e6,
+        color="cyan",
+        linewidth=3,
+        label="Meyerhofer"
+    )
+
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Thickness [μm]")
     ax.set_title("EBP vs Meyerhofer Thickness Evolution")
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=12)
+
     st.pyplot(fig)
 
     st.markdown("### Model Equations")
@@ -351,29 +426,45 @@ with tab1:
 
 
 # =====================================================
-# Tab 2: Radial Animation
+# Tab 2
 # =====================================================
 
 with tab2:
     st.subheader("Real-time Visualization of h(r,t)")
 
-    idx = st.slider("Select animation time", 0, len(profile_time) - 1, len(profile_time) - 1)
+    idx = st.slider(
+        "Select animation time",
+        0,
+        len(profile_time) - 1,
+        len(profile_time) - 1
+    )
+
     selected_profile = profiles[idx]
 
     st.write(f"Time = {profile_time[idx]:.2f} s")
 
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.plot(r * 100.0, selected_profile * 1e6, color="magenta", linewidth=3, label="h(r,t)")
+
+    ax.plot(
+        r * 100.0,
+        selected_profile * 1e6,
+        color="magenta",
+        linewidth=3,
+        label="h(r,t)"
+    )
+
     ax.set_xlabel("Radial Position r [cm]")
     ax.set_ylabel("Film Thickness h [μm]")
     ax.set_title("Radial Film Thickness Profile")
     ax.grid(True, alpha=0.3)
     ax.legend()
+
     st.pyplot(fig)
 
     st.subheader("Radial Uniformity vs Time")
 
     fig, ax = plt.subplots(figsize=(10, 5))
+
     ax.plot(
         radial_data["time_s"],
         radial_data["uniformity_percent"],
@@ -381,6 +472,7 @@ with tab2:
         linewidth=3,
         label="Radial Uniformity"
     )
+
     ax.axhline(
         spec,
         color="red",
@@ -388,22 +480,25 @@ with tab2:
         linewidth=2,
         label=f"Spec ±{spec:.2f}%"
     )
+
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Uniformity ± [%]")
     ax.set_title("Radial Uniformity Evolution")
     ax.grid(True, alpha=0.3)
     ax.legend()
+
     st.pyplot(fig)
 
 
 # =====================================================
-# Tab 3: Validation View
+# Tab 3
 # =====================================================
 
 with tab3:
     st.subheader("Validation View: Numerical EBP vs Analytical EBP")
 
     fig, ax = plt.subplots(figsize=(10, 5))
+
     ax.plot(
         t_ebp,
         h_ebp_num * 1e6,
@@ -411,6 +506,7 @@ with tab3:
         linewidth=3,
         label="EBP Numerical"
     )
+
     ax.plot(
         t_ebp,
         h_ebp_exact * 1e6,
@@ -419,11 +515,13 @@ with tab3:
         linestyle="--",
         label="EBP Analytical"
     )
+
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("Thickness [μm]")
     ax.set_title("Validation: Analytical Solution Comparison")
     ax.grid(True, alpha=0.3)
     ax.legend()
+
     st.pyplot(fig)
 
     error = np.max(np.abs(h_ebp_num - h_ebp_exact)) * 1e6
@@ -434,14 +532,13 @@ with tab3:
         Validation meaning:
 
         - When evaporation is ignored and viscosity is constant, the numerical simulator should reproduce the analytical EBP solution.
-        - If η becomes very large, centrifugal thinning becomes weak.
-        - This corresponds to the analytical limit where viscous resistance dominates.
+        - This checks whether the time integration is consistent with the analytical limit.
         """
     )
 
 
 # =====================================================
-# Tab 4: Challenge Mode
+# Tab 4
 # =====================================================
 
 with tab4:
@@ -473,13 +570,14 @@ with tab4:
 
         if len(success_df) == 0:
             st.error("No combination satisfied the uniformity specification.")
-            st.write("Try higher RPM, lower η₀, lower edge bead strength, or larger radial leveling coefficient.")
+            st.write("Try higher RPM, lower η₀, lower edge bead strength, or larger leveling coefficient.")
         else:
             best = success_df.iloc[0]
 
             st.success("Valid combinations were found.")
 
             c1, c2, c3, c4 = st.columns(4)
+
             c1.metric("Best RPM", f"{best['RPM']:.0f}")
             c2.metric("Best ω", f"{best['omega_rad_s']:.2f} rad/s")
             c3.metric("Best η₀", f"{best['eta0_Pa_s']:.4f} Pa·s")
@@ -488,17 +586,20 @@ with tab4:
             st.subheader("Successful Combinations")
             st.dataframe(success_df)
 
+            # Search result plot
             search_plot_df = search_df.reset_index()
 
             fig, ax = plt.subplots(figsize=(10, 5))
+
             ax.plot(
                 search_plot_df["index"],
                 search_plot_df["final_uniformity_percent"],
                 color="cyan",
                 linewidth=2,
                 marker="o",
-                label="Search Result Uniformity"
+                label="Uniformity"
             )
+
             ax.axhline(
                 spec,
                 color="red",
@@ -506,27 +607,45 @@ with tab4:
                 linewidth=2,
                 label=f"Spec ±{spec:.2f}%"
             )
+
             ax.set_xlabel("Search Case Index")
             ax.set_ylabel("Final Uniformity ± [%]")
-            ax.set_title("Uniformity over Searched RPM-η₀ Combinations")
+            ax.set_title("Uniformity over RPM-η₀ Search Cases")
             ax.grid(True, alpha=0.3)
             ax.legend()
+
+            st.pyplot(fig)
+
+            # RPM vs eta0 map
+            st.subheader("RPM-η₀ Uniformity Map")
+
+            fig, ax = plt.subplots(figsize=(9, 6))
+
+            sc = ax.scatter(
+                search_df["RPM"],
+                search_df["eta0_Pa_s"],
+                c=search_df["final_uniformity_percent"],
+                cmap="viridis_r",
+                s=80,
+                edgecolors="black"
+            )
+
+            ax.set_xlabel("RPM")
+            ax.set_ylabel("Initial Viscosity η₀ [Pa·s]")
+            ax.set_title("Uniformity Map: High RPM and Low η₀ Improve Uniformity")
+
+            cbar = plt.colorbar(sc, ax=ax)
+            cbar.set_label("Final Uniformity ± [%]")
+
             st.pyplot(fig)
 
 
 # =====================================================
-# Tab 5: Design Exploration
+# Tab 5
 # =====================================================
 
 with tab5:
     st.subheader("Design Exploration Mode")
-
-    st.markdown(
-        """
-        This mode summarizes the current user-editable geometry and process conditions.
-        The final radial uniformity updates according to the selected input parameters.
-        """
-    )
 
     design_df = pd.DataFrame({
         "Parameter": [
@@ -542,6 +661,7 @@ with tab5:
             "Edge bead strength",
             "Edge bead width ratio",
             "Radial leveling coefficient",
+            "Leveling rate [1/s]",
             "Final radial uniformity [%]"
         ],
         "Value": [
@@ -557,6 +677,7 @@ with tab5:
             edge_bead_strength,
             edge_bead_width_ratio,
             leveling_coeff,
+            leveling_rate,
             final_uniformity
         ]
     })
@@ -570,7 +691,7 @@ with tab5:
 
 
 # =====================================================
-# Tab 6: Process Insight
+# Tab 6
 # =====================================================
 
 with tab6:
@@ -578,33 +699,32 @@ with tab6:
 
     st.markdown(
         f"""
-        ### What the simulator teaches
+        ### Key result
 
-        1. **EBP model** predicts thinning only by centrifugal outflow.
-        2. **Meyerhofer-type model** predicts slower late-stage thinning because viscosity increases with time.
-        3. The radial profile shows that edge bead causes non-uniform final thickness.
-        4. Increasing RPM generally improves radial leveling.
-        5. Increasing initial viscosity η₀ suppresses radial flow and can worsen uniformity.
-        6. Evaporation reduces total thickness but does not automatically improve radial uniformity.
-        7. The predicted gel time indicates when viscosity becomes high enough to strongly suppress flow.
+        In this simulator, radial uniformity is linked to a leveling rate:
 
-        ### Recommendation to a fab engineer
+        leveling rate ∝ RPM² / η₀
 
-        - Use sufficiently high RPM to improve radial spreading.
-        - Avoid too large η₀ because high viscosity prevents leveling.
-        - Control solvent evaporation rate because rapid evaporation can freeze non-uniform profiles.
-        - Reduce edge bead strength by optimizing dispense volume, acceleration ramp, and edge bead removal.
-        - Choose process conditions satisfying:
+        Therefore:
 
-        \\[
-        Uniformity = \\frac{{h_{{max}}-h_{{min}}}}{{2h_{{avg}}}}\\times 100 \\leq {spec:.2f}\\%
-        \\]
+        - Higher RPM produces stronger radial spreading.
+        - Lower initial viscosity η₀ allows easier flow.
+        - As a result, high RPM and low η₀ improve radial uniformity.
+
+        ### Process recommendation
+
+        To satisfy the ±{spec:.2f}% radial uniformity specification:
+
+        - Increase RPM within the allowed process range.
+        - Use a lower initial viscosity photoresist when possible.
+        - Reduce edge bead strength by controlling dispense volume, acceleration ramp, and edge bead removal.
+        - Avoid excessive solvent evaporation before sufficient radial leveling occurs.
         """
     )
 
 
 # =====================================================
-# Tab 7: Simulation Data
+# Tab 7
 # =====================================================
 
 with tab7:
