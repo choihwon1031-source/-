@@ -1,9 +1,9 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 
 st.set_page_config(page_title="Spin Coating Thin-Film Simulator", layout="wide")
+
 
 # =====================================================
 # Basic functions
@@ -34,7 +34,7 @@ def calc_uniformity_percent(h_profile):
 
 def simulate_ebp_0d(h0, rho, rpm, eta0, t_end, dt):
     omega = rpm_to_omega(rpm)
-    t = np.arange(0, t_end + dt, dt)
+    t = np.arange(0.0, t_end + dt, dt)
     h = np.zeros_like(t)
     h[0] = h0
 
@@ -51,18 +51,16 @@ def simulate_ebp_0d(h0, rho, rpm, eta0, t_end, dt):
 
 def simulate_meyerhofer_0d(h0, rho, rpm, eta0, B, E, h_dry, t_end, dt):
     omega = rpm_to_omega(rpm)
-    t = np.arange(0, t_end + dt, dt)
+    t = np.arange(0.0, t_end + dt, dt)
     h = np.zeros_like(t)
     eta = np.zeros_like(t)
 
     h[0] = h0
-    eta[0] = eta0
 
     for n in range(len(t) - 1):
         eta[n] = eta_meyerhofer(t[n], eta0, B)
 
         dhdt = -(2.0 * rho * omega**2 / (3.0 * eta[n])) * h[n]**3 - E
-
         h[n + 1] = max(h[n] + dt * dhdt, h_dry)
 
     eta[-1] = eta_meyerhofer(t[-1], eta0, B)
@@ -72,8 +70,6 @@ def simulate_meyerhofer_0d(h0, rho, rpm, eta0, B, E, h_dry, t_end, dt):
 
 # =====================================================
 # Radial FDM model
-# This is the important corrected part.
-# Uniformity now depends on rpm and eta0.
 # =====================================================
 
 def simulate_radial_fdm(
@@ -96,9 +92,9 @@ def simulate_radial_fdm(
     r = np.linspace(0.0, R, Nr)
     dr = r[1] - r[0]
 
-    # Initial profile with edge bead
     edge_width = edge_bead_width_ratio * R
     edge_shape = np.exp(-((R - r) / edge_width) ** 2)
+
     h = h0 * (1.0 + edge_bead_strength * edge_shape)
 
     times = np.arange(0.0, t_end + dt, dt)
@@ -123,16 +119,13 @@ def simulate_radial_fdm(
         if n == len(times) - 1:
             break
 
-        # Face values
         r_face = 0.5 * (r[:-1] + r[1:])
         h_face = 0.5 * (h[:-1] + h[1:])
 
-        # Flux q = rho omega^2 r h^3 / 3 eta
         q_face = rho * omega**2 * r_face * h_face**3 / (3.0 * eta)
 
         h_new = h.copy()
 
-        # Interior cells
         for i in range(1, Nr - 1):
             flux_out = r_face[i] * q_face[i]
             flux_in = r_face[i - 1] * q_face[i - 1]
@@ -142,10 +135,8 @@ def simulate_radial_fdm(
             h_new[i] = h[i] - dt * radial_term - dt * E
             h_new[i] = max(h_new[i], h_dry)
 
-        # Center boundary: symmetry
         h_new[0] = h_new[1]
 
-        # Edge boundary: outflow allowed
         i = Nr - 1
         flux_in = r_face[i - 1] * q_face[i - 1]
         flux_out = R * q_face[i - 1]
@@ -270,11 +261,11 @@ rpm_max = st.sidebar.number_input("Search RPM max", value=6000.0, step=100.0)
 eta_min = st.sidebar.number_input("Search η₀ min [Pa·s]", value=0.02, step=0.01)
 eta_max = st.sidebar.number_input("Search η₀ max [Pa·s]", value=0.20, step=0.01)
 
-# Unit conversion
 h0 = h0_um * 1e-6
 E = E_um_s * 1e-6
 h_dry = h_dry_um * 1e-6
 R = R_cm * 1e-2
+
 
 # =====================================================
 # Main simulations
@@ -301,12 +292,13 @@ r, h_final_profile, radial_data = simulate_radial_fdm(
 
 final_uniformity = radial_data["uniformity_percent"].iloc[-1]
 
+
 # =====================================================
 # UI
 # =====================================================
 
 st.title("Spin Coating Thin-Film Simulator")
-st.caption("Corrected version: radial uniformity depends on RPM and initial viscosity η₀")
+st.caption("Corrected version without Plotly: radial uniformity depends on RPM and η₀")
 
 col1, col2, col3, col4 = st.columns(4)
 
@@ -328,105 +320,63 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Simulation Data"
 ])
 
+
 # =====================================================
 # Tab 1
 # =====================================================
 
 with tab1:
-    fig = go.Figure()
+    st.subheader("Thickness Evolution: EBP vs Meyerhofer")
 
-    fig.add_trace(go.Scatter(
-        x=t_ebp,
-        y=h_ebp * 1e6,
-        mode="lines",
-        name="EBP"
-    ))
+    plot_df = pd.DataFrame({
+        "time_s": t_ebp,
+        "EBP_um": h_ebp * 1e6,
+        "Meyerhofer_um": h_mey * 1e6
+    })
 
-    fig.add_trace(go.Scatter(
-        x=t_mey,
-        y=h_mey * 1e6,
-        mode="lines",
-        name="Meyerhofer"
-    ))
+    st.line_chart(plot_df, x="time_s", y=["EBP_um", "Meyerhofer_um"])
 
-    fig.update_layout(
-        title="Thickness Evolution: EBP vs Meyerhofer",
-        xaxis_title="Time [s]",
-        yaxis_title="Film Thickness [μm]",
-        template="plotly_dark"
-    )
-
-    st.plotly_chart(fig, use_container_width=True)
 
 # =====================================================
 # Tab 2
 # =====================================================
 
 with tab2:
-    fig = go.Figure()
+    st.subheader("Final Radial Thickness Profile")
 
-    fig.add_trace(go.Scatter(
-        x=r * 100.0,
-        y=h_final_profile * 1e6,
-        mode="lines+markers",
-        name="Final radial thickness"
-    ))
+    radial_plot_df = pd.DataFrame({
+        "r_cm": r * 100.0,
+        "thickness_um": h_final_profile * 1e6
+    })
 
-    fig.update_layout(
-        title="Final Radial Thickness Profile",
-        xaxis_title="Radial Position r [cm]",
-        yaxis_title="Film Thickness [μm]",
-        template="plotly_dark"
-    )
+    st.line_chart(radial_plot_df, x="r_cm", y="thickness_um")
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.subheader("Radial Uniformity vs Time")
 
-    fig2 = go.Figure()
+    uniformity_plot_df = pd.DataFrame({
+        "time_s": radial_data["time_s"],
+        "uniformity_percent": radial_data["uniformity_percent"]
+    })
 
-    fig2.add_trace(go.Scatter(
-        x=radial_data["time_s"],
-        y=radial_data["uniformity_percent"],
-        mode="lines",
-        name="Radial Uniformity"
-    ))
+    st.line_chart(uniformity_plot_df, x="time_s", y="uniformity_percent")
 
-    fig2.add_hline(
-        y=spec,
-        line_dash="dash",
-        annotation_text=f"Spec ±{spec:.2f}%"
-    )
+    st.write(f"Target specification: ±{spec:.2f} %")
 
-    fig2.update_layout(
-        title="Radial Uniformity vs Time",
-        xaxis_title="Time [s]",
-        yaxis_title="Uniformity ± [%]",
-        template="plotly_dark"
-    )
-
-    st.plotly_chart(fig2, use_container_width=True)
 
 # =====================================================
 # Tab 3
 # =====================================================
 
 with tab3:
-    fig = go.Figure()
+    st.subheader("Meyerhofer Viscosity Growth")
 
-    fig.add_trace(go.Scatter(
-        x=t_mey,
-        y=eta_mey,
-        mode="lines",
-        name="η(t)"
-    ))
+    viscosity_plot_df = pd.DataFrame({
+        "time_s": t_mey,
+        "eta_Pa_s": eta_mey
+    })
 
-    fig.update_layout(
-        title="Meyerhofer Viscosity Growth",
-        xaxis_title="Time [s]",
-        yaxis_title="Viscosity η(t) [Pa·s]",
-        template="plotly_dark"
-    )
+    st.line_chart(viscosity_plot_df, x="time_s", y="eta_Pa_s")
 
-    st.plotly_chart(fig, use_container_width=True)
 
 # =====================================================
 # Tab 4
@@ -466,40 +416,29 @@ with tab4:
 
             best = success_df.iloc[0]
 
-            st.metric("Best RPM", f"{best['RPM']:.0f}")
-            st.metric("Best ω", f"{best['omega_rad_s']:.2f} rad/s")
-            st.metric("Best η₀", f"{best['eta0_Pa_s']:.4f} Pa·s")
-            st.metric("Best Uniformity", f"±{best['final_uniformity_percent']:.3f} %")
+            colA, colB, colC, colD = st.columns(4)
+            colA.metric("Best RPM", f"{best['RPM']:.0f}")
+            colB.metric("Best ω", f"{best['omega_rad_s']:.2f} rad/s")
+            colC.metric("Best η₀", f"{best['eta0_Pa_s']:.4f} Pa·s")
+            colD.metric("Best Uniformity", f"±{best['final_uniformity_percent']:.3f} %")
 
             st.subheader("Successful Combinations")
             st.dataframe(success_df)
 
-            fig = go.Figure()
-
-            fig.add_trace(go.Scatter(
-                x=search_df["RPM"],
-                y=search_df["eta0_Pa_s"],
-                mode="markers",
-                marker=dict(
-                    size=10,
-                    color=search_df["final_uniformity_percent"],
-                    colorbar=dict(title="Uniformity [%]")
-                ),
-                text=[
-                    f"RPM={row.RPM:.0f}<br>η₀={row.eta0_Pa_s:.4f}<br>Uniformity={row.final_uniformity_percent:.3f}%"
-                    for row in search_df.itertuples()
-                ],
-                name="Search Results"
-            ))
-
-            fig.update_layout(
-                title="Challenge Search Map: RPM vs η₀",
-                xaxis_title="RPM",
-                yaxis_title="η₀ [Pa·s]",
-                template="plotly_dark"
+            search_plot_df = search_df.copy()
+            search_plot_df["RPM_eta_label"] = (
+                "RPM " + search_plot_df["RPM"].round(0).astype(int).astype(str)
+                + " / eta " + search_plot_df["eta0_Pa_s"].round(3).astype(str)
             )
 
-            st.plotly_chart(fig, use_container_width=True)
+            st.subheader("Uniformity of Search Results")
+
+            st.line_chart(
+                search_plot_df.reset_index(),
+                x="index",
+                y="final_uniformity_percent"
+            )
+
 
 # =====================================================
 # Tab 5
