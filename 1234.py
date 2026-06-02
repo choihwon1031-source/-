@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="Spin Coating Simulator", layout="wide")
 
 st.title("Spin Coating Simulator")
-st.caption("EBP + Evaporation + Radial Uniformity + Validation + Challenge Mode")
+st.caption("EBP + Mild Evaporation + Radial Uniformity + Validation + Challenge Mode")
 
 # =====================================================
 # Sidebar
@@ -18,7 +18,9 @@ rpm = st.sidebar.slider("Spin Speed ω (RPM)", 500, 6000, 3000, 100)
 h0_um = st.sidebar.number_input("Initial Thickness h₀ (μm)", value=100.0, min_value=1.0)
 mu0 = st.sidebar.number_input("Initial Viscosity η₀ (Pa·s)", value=0.05, min_value=0.001)
 rho = st.sidebar.number_input("Density ρ (kg/m³)", value=1000.0, min_value=1.0)
-E_um_s = st.sidebar.number_input("Evaporation Rate E (μm/s)", value=0.30, min_value=0.0)
+
+# 기본값을 0.30 → 0.03으로 낮춤
+E_um_s = st.sidebar.number_input("Evaporation Rate E (μm/s)", value=0.03, min_value=0.0)
 
 wafer_radius_cm = st.sidebar.number_input("Wafer Radius R (cm)", value=5.0, min_value=1.0)
 edge_strength = st.sidebar.slider("Edge Bead Strength", 0.0, 0.30, 0.08, 0.01)
@@ -47,11 +49,18 @@ def simulate_center_thickness(rpm, h0_um, mu0, rho, E_um_s, t_end, dt):
     h = np.zeros_like(time)
     h[0] = h0_um * 1e-6
 
+    h0 = h0_um * 1e-6
     E = E_um_s * 1e-6
+
+    # 최종 건조막 두께. 0으로 떨어지는 비물리적 결과 방지
     h_dry = 0.5e-6
 
     for i in range(len(time) - 1):
-        dry_factor = max((h[i] - h_dry) / h[i], 0.0)
+        # Dry film에 가까워질수록 증발 효과를 부드럽게 감소
+        dry_factor = max((h[i] - h_dry) / (h0 - h_dry), 0.0)
+
+        # 급격한 수직 하강 방지
+        dry_factor = dry_factor**2
 
         centrifugal = -(2 * rho * omega**2 / (3 * mu0)) * h[i]**3
         evaporation = -E * dry_factor
@@ -59,10 +68,8 @@ def simulate_center_thickness(rpm, h0_um, mu0, rho, E_um_s, t_end, dt):
         dhdt = centrifugal + evaporation
         h_next = h[i] + dhdt * dt
 
-        if h_next < h_dry:
-            h_next = h_dry + 0.98 * (h[i] - h_dry)
-
-        h[i + 1] = h_next
+        # h_dry 아래로 내려가지 않게만 제한
+        h[i + 1] = max(h_next, h_dry)
 
     return time, h * 1e6
 
@@ -71,7 +78,10 @@ def ebp_analytical(rpm, h0_um, mu0, rho, time):
     omega = rpm * 2 * np.pi / 60
     h0 = h0_um * 1e-6
 
-    h = 1 / np.sqrt((1 / h0**2) + (4 * rho * omega**2 / (3 * mu0)) * time)
+    h = 1 / np.sqrt(
+        (1 / h0**2)
+        + (4 * rho * omega**2 / (3 * mu0)) * time
+    )
 
     return h * 1e6
 
@@ -95,7 +105,9 @@ def uniformity_percent(h_r):
 
 
 def gel_time_prediction(rpm, h0_um, mu0, rho, E_um_s, t_end, dt, threshold_um=2.0):
-    time, h = simulate_center_thickness(rpm, h0_um, mu0, rho, E_um_s, t_end, dt)
+    time, h = simulate_center_thickness(
+        rpm, h0_um, mu0, rho, E_um_s, t_end, dt
+    )
 
     idx = np.where(h <= threshold_um)[0]
 
@@ -113,13 +125,17 @@ def challenge_search():
 
     for r_case in rpm_cases:
         for mu_case in mu_cases:
-            time_case, h_case = simulate_center_thickness(
+            _, h_case = simulate_center_thickness(
                 r_case, h0_um, mu_case, rho, E_um_s, t_end, dt
             )
 
             h_final = h_case[-1]
+
             _, h_r_case = radial_profile(
-                h_final, wafer_radius_cm, edge_strength, edge_width
+                h_final,
+                wafer_radius_cm,
+                edge_strength,
+                edge_width
             )
 
             uni = uniformity_percent(h_r_case)
@@ -134,7 +150,12 @@ def challenge_search():
 
     return pd.DataFrame(
         results,
-        columns=["RPM", "η₀ (Pa·s)", "Final Center Thickness (μm)", "Uniformity ± (%)"]
+        columns=[
+            "RPM",
+            "η₀ (Pa·s)",
+            "Final Center Thickness (μm)",
+            "Uniformity ± (%)"
+        ]
     )
 
 # =====================================================
@@ -142,17 +163,41 @@ def challenge_search():
 # =====================================================
 
 time, h_center = simulate_center_thickness(
-    rpm, h0_um, mu0, rho, E_um_s, t_end, dt
+    rpm,
+    h0_um,
+    mu0,
+    rho,
+    E_um_s,
+    t_end,
+    dt
 )
 
-h_analytic = ebp_analytical(rpm, h0_um, mu0, rho, time)
+h_analytic = ebp_analytical(
+    rpm,
+    h0_um,
+    mu0,
+    rho,
+    time
+)
 
 r, h_r = radial_profile(
-    h_center[-1], wafer_radius_cm, edge_strength, edge_width
+    h_center[-1],
+    wafer_radius_cm,
+    edge_strength,
+    edge_width
 )
 
 uniformity = uniformity_percent(h_r)
-t_gel = gel_time_prediction(rpm, h0_um, mu0, rho, E_um_s, t_end, dt)
+
+t_gel = gel_time_prediction(
+    rpm,
+    h0_um,
+    mu0,
+    rho,
+    E_um_s,
+    t_end,
+    dt
+)
 
 # =====================================================
 # Metrics
@@ -200,7 +245,7 @@ with tab1:
     ax.plot(
         time,
         h_center,
-        label="Numerical model: EBP + evaporation"
+        label="Numerical model: EBP + mild evaporation"
     )
 
     ax.set_xlabel("Time (s)")
@@ -211,7 +256,7 @@ with tab1:
 
     st.markdown(
         """
-        This plot compares the analytical EBP limit with the numerical model including evaporation.
+        This plot compares the analytical EBP limit with the numerical model including mild evaporation.
         The analytical curve represents centrifugal thinning only, while the numerical curve includes solvent evaporation.
         """
     )
@@ -234,7 +279,7 @@ with tab2:
     ax.plot(
         time,
         h_center,
-        label="Numerical model, EBP + evaporation"
+        label="Numerical model, EBP + mild evaporation"
     )
 
     ax.set_xlabel("Time (s)")
@@ -361,7 +406,7 @@ with tab5:
     df = pd.DataFrame({
         "Time (s)": time,
         "Analytical EBP Thickness (μm)": h_analytic,
-        "Numerical EBP + Evaporation Thickness (μm)": h_center,
+        "Numerical EBP + Mild Evaporation Thickness (μm)": h_center,
     })
 
     st.dataframe(df)
