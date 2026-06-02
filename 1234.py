@@ -18,7 +18,7 @@ rpm = st.sidebar.slider("Spin Speed ω (RPM)", 500, 6000, 3000, 100)
 h0_um = st.sidebar.number_input("Initial Thickness h₀ (μm)", value=100.0, min_value=1.0)
 mu0 = st.sidebar.number_input("Initial Viscosity η₀ (Pa·s)", value=0.05, min_value=0.001)
 rho = st.sidebar.number_input("Density ρ (kg/m³)", value=1000.0, min_value=1.0)
-E_um_s = st.sidebar.number_input("Evaporation Rate E (μm/s)", value=0.10, min_value=0.0)
+E_um_s = st.sidebar.number_input("Evaporation Rate E (μm/s)", value=0.30, min_value=0.0)
 
 wafer_radius_cm = st.sidebar.number_input("Wafer Radius R (cm)", value=5.0, min_value=1.0)
 edge_strength = st.sidebar.slider("Edge Bead Strength", 0.0, 0.30, 0.08, 0.01)
@@ -48,7 +48,6 @@ def simulate_center_thickness(rpm, h0_um, mu0, rho, E_um_s, t_end, dt):
     h[0] = h0_um * 1e-6
 
     E = E_um_s * 1e-6
-
     h_dry = 0.5e-6
 
     for i in range(len(time) - 1):
@@ -95,7 +94,7 @@ def uniformity_percent(h_r):
     return 100 * (h_max - h_min) / (2 * h_avg)
 
 
-def gel_time_prediction(rpm, h0_um, mu0, rho, E_um_s, threshold_um=2.0):
+def gel_time_prediction(rpm, h0_um, mu0, rho, E_um_s, t_end, dt, threshold_um=2.0):
     time, h = simulate_center_thickness(rpm, h0_um, mu0, rho, E_um_s, t_end, dt)
 
     idx = np.where(h <= threshold_um)[0]
@@ -119,11 +118,11 @@ def challenge_search():
             )
 
             h_final = h_case[-1]
-            _, h_r = radial_profile(
+            _, h_r_case = radial_profile(
                 h_final, wafer_radius_cm, edge_strength, edge_width
             )
 
-            uni = uniformity_percent(h_r)
+            uni = uniformity_percent(h_r_case)
 
             if uni <= target_uniformity:
                 results.append([
@@ -153,7 +152,7 @@ r, h_r = radial_profile(
 )
 
 uniformity = uniformity_percent(h_r)
-t_gel = gel_time_prediction(rpm, h0_um, mu0, rho, E_um_s)
+t_gel = gel_time_prediction(rpm, h0_um, mu0, rho, E_um_s, t_end, dt)
 
 # =====================================================
 # Metrics
@@ -191,7 +190,19 @@ with tab1:
     st.subheader("Real-time Thickness Evolution")
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(time, h_center, label="Numerical model: EBP + evaporation")
+
+    ax.plot(
+        time,
+        h_analytic,
+        label="Analytical EBP: centrifugal thinning only"
+    )
+
+    ax.plot(
+        time,
+        h_center,
+        label="Numerical model: EBP + evaporation"
+    )
+
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Center Film Thickness (μm)")
     ax.grid(True)
@@ -200,8 +211,8 @@ with tab1:
 
     st.markdown(
         """
-        This plot shows the real-time film thinning behavior at the wafer center.
-        The film rapidly thins during the early spin stage and gradually approaches a dry-film limit.
+        This plot compares the analytical EBP limit with the numerical model including evaporation.
+        The analytical curve represents centrifugal thinning only, while the numerical curve includes solvent evaporation.
         """
     )
 
@@ -213,8 +224,19 @@ with tab2:
     st.subheader("Simulator Validation: Numerical Model vs Analytical EBP Limit")
 
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.plot(time, h_center, label="Numerical model")
-    ax.plot(time, h_analytic, "--", label="Analytical EBP limit, E = 0")
+
+    ax.plot(
+        time,
+        h_analytic,
+        label="Analytical EBP limit, E = 0"
+    )
+
+    ax.plot(
+        time,
+        h_center,
+        label="Numerical model, EBP + evaporation"
+    )
+
     ax.set_xlabel("Time (s)")
     ax.set_ylabel("Film Thickness (μm)")
     ax.grid(True)
@@ -228,8 +250,8 @@ with tab2:
     st.markdown(
         """
         The analytical EBP solution is used as a validation limit.
-        When evaporation is small, the numerical solution should approach the analytical EBP curve.
-        If evaporation is increased, the numerical result becomes thinner than the analytical EBP prediction.
+        When evaporation is small, the numerical solution approaches the analytical EBP curve.
+        When evaporation is increased, the numerical result becomes thinner than the analytical EBP prediction.
         """
     )
 
@@ -250,8 +272,10 @@ with tab3:
     st.subheader("Radial Thickness Profile and Edge Bead Visualization")
 
     fig, ax = plt.subplots(figsize=(8, 5))
+
     ax.plot(r, h_r, label="Final radial thickness h(r)")
     ax.axhline(np.mean(h_r), linestyle="--", label="Average thickness")
+
     ax.set_xlabel("Radial Position r (cm)")
     ax.set_ylabel("Final Film Thickness h(r) (μm)")
     ax.grid(True)
@@ -263,7 +287,7 @@ with tab3:
     st.markdown(
         """
         The radial profile visualizes the edge bead effect.
-        A larger edge bead strength increases thickness near the wafer edge and worsens radial uniformity.
+        Larger edge bead strength increases thickness near the wafer edge and worsens radial uniformity.
         """
     )
 
@@ -284,11 +308,13 @@ with tab4:
             st.dataframe(result_df)
 
             fig, ax = plt.subplots(figsize=(8, 5))
+
             scatter = ax.scatter(
                 result_df["RPM"],
                 result_df["η₀ (Pa·s)"],
                 c=result_df["Final Center Thickness (μm)"]
             )
+
             ax.set_xlabel("RPM")
             ax.set_ylabel("Initial Viscosity η₀ (Pa·s)")
             ax.grid(True)
@@ -334,8 +360,8 @@ with tab5:
 
     df = pd.DataFrame({
         "Time (s)": time,
-        "Center Thickness (μm)": h_center,
         "Analytical EBP Thickness (μm)": h_analytic,
+        "Numerical EBP + Evaporation Thickness (μm)": h_center,
     })
 
     st.dataframe(df)
